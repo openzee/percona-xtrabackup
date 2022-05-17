@@ -103,6 +103,12 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "crc_glue.h"
 #include "xtrabackup_config.h"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
 /* TODO: replace with appropriate macros used in InnoDB 5.6 */
 #define PAGE_ZIP_MIN_SIZE_SHIFT	10
 #define DICT_TF_ZSSIZE_SHIFT	1
@@ -123,6 +129,8 @@ const char reserved_system_space_name[] = "innodb_system";
 tablespace. */
 const char reserved_temporary_space_name[] = "innodb_temporary";
 
+extern int xtrabackup_target_socket_fd; 
+
 /* === xtrabackup specific options === */
 char xtrabackup_real_target_dir[FN_REFLEN] = "./xtrabackup_backupfiles/";
 char *xtrabackup_target_dir= xtrabackup_real_target_dir;
@@ -134,6 +142,8 @@ my_bool xtrabackup_copy_back = FALSE;
 my_bool xtrabackup_move_back = FALSE;
 my_bool xtrabackup_decrypt_decompress = FALSE;
 my_bool xtrabackup_print_param = FALSE;
+my_bool xtrabackup_listen= FALSE;
+int xtrabackup_listen_port=9000;
 
 my_bool xtrabackup_export = FALSE;
 my_bool xtrabackup_apply_log_only = FALSE;
@@ -713,10 +723,18 @@ enum options_xtrabackup
   OPT_XTRA_TABLES_COMPATIBILITY_CHECK,
   OPT_XTRA_CHECK_PRIVILEGES,
   OPT_XTRA_READ_BUFFER_SIZE,
+  OPT_XTRA_BACKUP_LISTEN,
+  OPT_XTRA_BACKUP_LISTEN_PORT,
 };
 
 struct my_option xb_client_options[] =
 {
+  {"backup-listen", OPT_XTRA_BACKUP_LISTEN, "xtrabackup enable backup-listen mode",
+   (G_PTR *) &xtrabackup_listen, (G_PTR *) &xtrabackup_listen, 0, GET_BOOL,
+   NO_ARG, 0, 0, 0, 0, 0, 0},
+  {"listen-port", OPT_XTRA_BACKUP_LISTEN_PORT, "xtrabackup backup-listen port default 9000",
+   (G_PTR*) &xtrabackup_listen_port, (G_PTR*) &xtrabackup_listen_port, 0, GET_INT,
+   REQUIRED_ARG, 9000, 0, 0, 0, 0, 0},
   {"version", 'v', "print xtrabackup version information",
    (G_PTR *) &xtrabackup_version, (G_PTR *) &xtrabackup_version, 0, GET_BOOL,
    NO_ARG, 0, 0, 0, 0, 0, 0},
@@ -2846,6 +2864,7 @@ xtrabackup_copy_datafile(fil_node_t* node, uint thread_n)
 		goto error;
 	}
 
+    msg_ts("ds_open [%02u] %s\n", thread_n, dst_name );
 	dstfile = ds_open(ds_data, dst_name, &cursor.statinfo);
 	if (dstfile == NULL) {
 		msg("[%02u] xtrabackup: error: "
@@ -8849,6 +8868,86 @@ void setup_error_messages()
 
 /* ================= main =================== */
 
+int enable_listen_mode(){
+
+	int sockfd = socket( AF_INET, SOCK_STREAM, 0 );
+	if (sockfd == -1 ){
+        msg("socket open fails. errno:%d\n", errno );
+        return -1;
+    }
+
+    int reuse_port_flags= 1;
+    if( setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &reuse_port_flags, sizeof(reuse_port_flags) ) == -1 ){
+        close(sockfd);
+        msg("set socket SO_REUSEPORT fails. errno:%d\n", errno);
+        return -1;
+    }
+
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr) );
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(xtrabackup_listen_port);
+    local_addr.sin_addr.s_addr = inet_addr("0.0.0.0");
+
+    if ( bind(sockfd,(struct sockaddr*)&local_addr, sizeof(local_addr)) == -1 ){
+        close(sockfd);
+        msg("socket bind fails. errno:%d\n", errno);
+        return -1;
+    }
+
+    if( listen( sockfd, 1 ) == -1 ){
+        close(sockfd);
+        msg("socket listen fails. errno:%d\n", errno);
+        return -1;
+    }
+
+ACCEPT_NEXT:
+    struct sockaddr_in remote_addr;
+    socklen_t addrlen = sizeof( struct sockaddr_in);
+    memset( &remote_addr, 0, sizeof(remote_addr) );
+
+    int fd = accept(sockfd, (struct sockaddr*) &remote_addr, &addrlen );
+    if( fd == -1 ){
+        close(sockfd);
+        msg("socket accpet fails. errno:%d\n", errno);
+        return -1;
+    }
+
+    msg( "accept new client\n" );
+    int send_buf_len = 1024*1024*4;
+    if( setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buf_len, sizeof(send_buf_len) ) == -1 ){
+        msg("set socket send buf 4MB fails. errno:%d\n", errno);
+    }
+
+    pid_t pid = fork();
+    if( pid == -1){
+        close(sockfd);
+        close(fd);
+        msg("fork fails. errno:%d\n", errno ); 
+        return -1;
+    }
+
+    if( pid > 0 ){
+
+        close(fd);
+
+        int wstatus = 0;
+        if( waitpid( pid, &wstatus, 0 ) == -1 ){
+            close(sockfd);
+            close(fd);
+            msg("waitpid fails. errno:%d\n", errno ); 
+            return -1;
+        }
+
+        msg("work xtrabackup exit:%d\n", wstatus);
+        goto ACCEPT_NEXT;
+    }
+
+    xtrabackup_target_socket_fd = fd;
+    
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
 	char **client_defaults, **server_defaults;
@@ -8883,6 +8982,12 @@ int main(int argc, char **argv)
 
 	handle_options(argc, argv, &client_argc, &client_defaults,
 		       &server_argc, &server_defaults);
+
+    if( xtrabackup_backup && xtrabackup_listen){
+        if( enable_listen_mode() == -1 ){
+		    exit(EXIT_FAILURE);
+        }
+    }
 
 	xb_libgcrypt_init();
 

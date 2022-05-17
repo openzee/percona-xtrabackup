@@ -23,6 +23,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "datasink.h"
 
+int xtrabackup_target_socket_fd = -1;
+
 typedef struct {
 	File fd;
 } ds_stdout_file_t;
@@ -52,6 +54,7 @@ stdout_init(const char *root)
 
 	ctxt->root = my_strdup(PSI_NOT_INSTRUMENTED, root, MYF(MY_FAE));
 
+    msg_ts( "stdout_init\n" );
 	return ctxt;
 }
 
@@ -90,16 +93,21 @@ stdout_open(ds_ctxt_t *ctxt __attribute__((unused)),
 	return file;
 }
 
+// success:0 fails: 1
 static
 int
 stdout_write(ds_file_t *file, const void *buf, size_t len)
 {
 	File fd = ((ds_stdout_file_t *) file->ptr)->fd;
 
-	if (!my_write(fd, buf, len, MYF(MY_WME | MY_NABP))) {
-		posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
-		return 0;
-	}
+	//if (!my_write(fd, buf, len, MYF(MY_WME | MY_NABP))) {
+	int rst = my_write(xtrabackup_target_socket_fd > 0 ? xtrabackup_target_socket_fd: fd , buf, len, MYF(MY_WME | MY_NABP));
+
+    if( !rst ){
+        return 0; 
+    }
+
+    close( xtrabackup_target_socket_fd );
 
 	return 1;
 }
