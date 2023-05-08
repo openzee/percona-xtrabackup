@@ -1,0 +1,24 @@
+#FROM redhat/ubi8:latest
+##RUN yum -y install cmake make gcc gcc-c++ libaio libaio-devel bison ncurses-devel libgcrypt-devel libcurl-devel libev-devel python-sphinx vim-common
+#RUN yum -y install cmake make gcc gcc-c++ libaio ncurses-devel libgcrypt-devel libcurl-devel vim-common
+
+#FROM centos:centos7.9.2009
+#RUN yum -y install cmake make gcc gcc-c++ libaio libaio-devel bison ncurses-devel libgcrypt-devel libcurl-devel libev-devel python-sphinx vim-common
+
+FROM percona/percona-xtrabackup:2.4.26
+
+RUN microdnf -y install automake  autoconf libtool cmake make gcc gcc-c++ autoconf automake openssl-devel ncurses-devel libcurl-devel libgcrypt-devel vim-common
+
+WORKDIR /root
+COPY ./boost_1_59_0.tar.gz /root/
+COPY ./bison-3.0.4-2.el7.x86_64.rpm ./bison-devel-3.0.4-2.el7.x86_64.rpm ./libaio-devel-0.3.112-1.el8.x86_64.rpm /root/
+RUN rpm -i bison-3.0.4-2.el7.x86_64.rpm bison-devel-3.0.4-2.el7.x86_64.rpm libaio-devel-0.3.112-1.el8.x86_64.rpm
+
+COPY ./libev-4.24/ /root/libev-4.24
+
+WORKDIR /root/libev-4.24
+RUN ./configure && make && make install
+
+WORKDIR /data
+CMD [ "cmake", "-DBUILD_CONFIG=xtrabackup_release", "-DWITH_BOOST=/root", "." ]
+
