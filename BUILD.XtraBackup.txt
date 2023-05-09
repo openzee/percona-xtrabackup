@@ -26,7 +26,7 @@ Compiling with CMake
 
 At the base directory of the source code tree, if you execute
 
-  $ cmake -DBUILD_CONFIG=xtrabackup_release && make -j4
+  $ cmake -DWITH_BOOST=/root -DBUILD_CONFIG=xtrabackup_release && make -j4
 
 and you go for a coffee, at your return XtraBackup will be ready to be used.
 
