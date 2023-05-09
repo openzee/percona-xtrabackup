@@ -5,9 +5,8 @@
 #FROM centos:centos7.9.2009
 #RUN yum -y install cmake make gcc gcc-c++ libaio libaio-devel bison ncurses-devel libgcrypt-devel libcurl-devel libev-devel python-sphinx vim-common
 
-FROM percona/percona-xtrabackup:2.4.26
-
-RUN microdnf -y install automake  autoconf libtool cmake make gcc gcc-c++ autoconf automake openssl-devel ncurses-devel libcurl-devel libgcrypt-devel vim-common
+FROM percona/percona-xtrabackup:2.4.26 as builder
+RUN microdnf -y install diffutils automake  autoconf libtool cmake make gcc gcc-c++ autoconf automake openssl-devel ncurses-devel libcurl-devel libgcrypt-devel vim-common
 
 WORKDIR /root
 COPY ./boost_1_59_0.tar.gz /root/
@@ -19,6 +18,10 @@ COPY ./libev-4.24/ /root/libev-4.24
 WORKDIR /root/libev-4.24
 RUN ./configure && make && make install
 
+ENV WITH_BOOST /root
 WORKDIR /data
-CMD [ "cmake", "-DBUILD_CONFIG=xtrabackup_release", "-DWITH_BOOST=/root", "." ]
+RUN --mount=type=bind,source=./,target=/data,readwrite cmake -DBUILD_CONFIG=xtrabackup_release -DWITH_BOOST=/root . && make && make install
+
+FROM percona/percona-xtrabackup:2.4.26
+COPY --from=builder /usr/local/xtrabackup/bin/xtrabackup /usr/local/bin/my_xtrabackup
 
