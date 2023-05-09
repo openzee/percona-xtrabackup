@@ -3086,3 +3086,5 @@ storage/innobase/xtrabackup/src/version_check_pl.h
 /CMakeCache.txt
 /storage/innobase/xtrabackup/src/libarchive/DartConfiguration.tcl
 /storage/innobase/xtrabackup/src/libarchive/cmake.tmp/CheckFuncs_stub.c
+
+.vscode/

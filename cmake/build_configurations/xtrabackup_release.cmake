@@ -53,7 +53,7 @@ IF(UNIX)
     # Enable fast mutexes on Linux
     OPTION(WITH_FAST_MUTEXES "" ON)
     # Enable building man pages on Linux by default
-    OPTION(WITH_MAN_PAGES "" ON)
+    OPTION(WITH_MAN_PAGES "" OFF)
   ENDIF()
 
 ENDIF()
