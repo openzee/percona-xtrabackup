@@ -108,6 +108,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <strings.h>
 
 /* TODO: replace with appropriate macros used in InnoDB 5.6 */
 #define PAGE_ZIP_MIN_SIZE_SHIFT	10
@@ -725,6 +726,7 @@ enum options_xtrabackup
   OPT_XTRA_READ_BUFFER_SIZE,
   OPT_XTRA_BACKUP_LISTEN,
   OPT_XTRA_BACKUP_LISTEN_PORT,
+  OPT_XTRA_BACKUP_TARGET_SOCKFD,
 };
 
 struct my_option xb_client_options[] =
@@ -734,7 +736,10 @@ struct my_option xb_client_options[] =
    NO_ARG, 0, 0, 0, 0, 0, 0},
   {"listen-port", OPT_XTRA_BACKUP_LISTEN_PORT, "xtrabackup backup-listen port default 9000",
    (G_PTR*) &xtrabackup_listen_port, (G_PTR*) &xtrabackup_listen_port, 0, GET_INT,
-   REQUIRED_ARG, 9000, 0, 0, 0, 0, 0},
+   REQUIRED_ARG, 9000, 0, 65535, 0, 0, 0},
+  {"target-sockfd", OPT_XTRA_BACKUP_TARGET_SOCKFD, "xtrabackup target-sockfd inheritance from parent default -1 ",
+   (G_PTR*) &xtrabackup_target_socket_fd, (G_PTR*) &xtrabackup_target_socket_fd, 0, GET_INT,
+   OPT_ARG, -1, -1, 0xFFFF, 0, 0, 0},
   {"version", 'v', "print xtrabackup version information",
    (G_PTR *) &xtrabackup_version, (G_PTR *) &xtrabackup_version, 0, GET_BOOL,
    NO_ARG, 0, 0, 0, 0, 0, 0},
@@ -5242,6 +5247,16 @@ skip_last_cp:
 		    latest_cp, log_copy_scanned_lsn);
 		exit(EXIT_FAILURE);
 	}
+
+	if( xtrabackup_target_socket_fd > 0 ){
+		char buf[64] = {0};
+		snprintf( buf,sizeof(buf), "0\r\ninnodb_to_lsn: " LSN_PF "\r\n\r\n", metadata_to_lsn );
+		ssize_t n = send( xtrabackup_target_socket_fd, buf, strlen(buf), 0 );
+		assert( (size_t)n == strlen(buf) );
+		close( xtrabackup_target_socket_fd );
+		xtrabackup_target_socket_fd = -1;
+		msg( "send end chunked %ld to_lsn:" LSN_PF " \n", n, metadata_to_lsn );
+	}
 }
 
 /* ================= stats ================= */
@@ -8869,16 +8884,15 @@ void setup_error_messages()
 /* ================= main =================== */
 
 int enable_listen_mode(){
-
-	int sockfd = socket( AF_INET, SOCK_STREAM, 0 );
-	if (sockfd == -1 ){
+	int listen_sockfd = socket( AF_INET, SOCK_STREAM, 0 );
+	if (listen_sockfd == -1 ){
         msg("socket open fails. errno:%d\n", errno );
         return -1;
     }
 
     int reuse_port_flags= 1;
-    if( setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &reuse_port_flags, sizeof(reuse_port_flags) ) == -1 ){
-        close(sockfd);
+    if( setsockopt(listen_sockfd, SOL_SOCKET, SO_REUSEPORT, &reuse_port_flags, sizeof(reuse_port_flags) ) == -1 ){
+        close(listen_sockfd);
         msg("set socket SO_REUSEPORT fails. errno:%d\n", errno);
         return -1;
     }
@@ -8889,14 +8903,14 @@ int enable_listen_mode(){
     local_addr.sin_port = htons(xtrabackup_listen_port);
     local_addr.sin_addr.s_addr = inet_addr("0.0.0.0");
 
-    if ( bind(sockfd,(struct sockaddr*)&local_addr, sizeof(local_addr)) == -1 ){
-        close(sockfd);
+    if ( bind(listen_sockfd,(struct sockaddr*)&local_addr, sizeof(local_addr)) == -1 ){
+        close(listen_sockfd);
         msg("socket bind fails. errno:%d\n", errno);
         return -1;
     }
 
-    if( listen( sockfd, 1 ) == -1 ){
-        close(sockfd);
+    if( listen( listen_sockfd, 1 ) == -1 ){
+        close(listen_sockfd);
         msg("socket listen fails. errno:%d\n", errno);
         return -1;
     }
@@ -8906,35 +8920,34 @@ ACCEPT_NEXT:
     socklen_t addrlen = sizeof( struct sockaddr_in);
     memset( &remote_addr, 0, sizeof(remote_addr) );
 
-    int fd = accept(sockfd, (struct sockaddr*) &remote_addr, &addrlen );
-    if( fd == -1 ){
-        close(sockfd);
+    int connect_sockfd = accept(listen_sockfd, (struct sockaddr*) &remote_addr, &addrlen );
+    if( connect_sockfd == -1 ){
+        close(listen_sockfd);
         msg("socket accpet fails. errno:%d\n", errno);
         return -1;
     }
 
     msg( "accept new client\n" );
     int send_buf_len = 1024*1024*4;
-    if( setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buf_len, sizeof(send_buf_len) ) == -1 ){
+    if( setsockopt(connect_sockfd, SOL_SOCKET, SO_SNDBUF, &send_buf_len, sizeof(send_buf_len) ) == -1 ){
         msg("set socket send buf 4MB fails. errno:%d\n", errno);
     }
 
     pid_t pid = fork();
     if( pid == -1){
-        close(sockfd);
-        close(fd);
+        close(listen_sockfd);
+        close(connect_sockfd);
         msg("fork fails. errno:%d\n", errno ); 
         return -1;
     }
 
     if( pid > 0 ){
 
-        close(fd);
+        close(connect_sockfd);
 
         int wstatus = 0;
         if( waitpid( pid, &wstatus, 0 ) == -1 ){
-            close(sockfd);
-            close(fd);
+            close(listen_sockfd);
             msg("waitpid fails. errno:%d\n", errno ); 
             return -1;
         }
@@ -8943,12 +8956,118 @@ ACCEPT_NEXT:
         goto ACCEPT_NEXT;
     }
 
-    xtrabackup_target_socket_fd = fd;
+    xtrabackup_target_socket_fd = connect_sockfd;
     
     return 0;
 }
 
-int main(int argc, char **argv)
+struct kv{
+	char key[32];
+	char val[32];
+};
+
+#define BACKUP_INFO_MAX_PARAM 10
+struct backup_info{
+	int nparam;
+	struct kv param[BACKUP_INFO_MAX_PARAM];	//最多支持10个参数
+};
+
+void backup_info_debug( const struct backup_info * p  ){
+
+	for( int i=0;i<p->nparam;i++ ){
+		msg( "key:[%s] val:[%s]\n", p->param[i].key, p->param[i].val );
+	}
+}
+
+int send_http_response_header(){
+	const char *buf = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: innodb_to_lsn\r\n\r\n";
+	while( *buf != '\0' ){
+		ssize_t n = send( xtrabackup_target_socket_fd, buf, strlen(buf), 0 );
+		if( n == -1 ){
+			msg( "send http response header fails. errno:%d\n", errno );
+			return -1;
+		}
+		buf += n;
+	}
+	return 0;
+}
+
+int recv_http_request( struct backup_info * pbackup_info ){
+
+#define GET_REQ_HEADER_MAX_SIZE 1024*16
+
+	char method[16]={0}, path[256]={0}, version[16]={0};
+
+	char buf[GET_REQ_HEADER_MAX_SIZE] = {0};
+	int nleft = GET_REQ_HEADER_MAX_SIZE;
+
+	while(1){
+		ssize_t nread = recv( xtrabackup_target_socket_fd, buf + (GET_REQ_HEADER_MAX_SIZE - nleft), nleft, 0 );
+		if( nread <= 0 ){
+			msg( "recv http request fails. errno:%d\n", errno );
+			return -1;
+		}
+
+		nleft -= nread;
+		if( nleft <= 0 ){
+			return -1;
+		}
+
+		if( strstr( buf, "\r\n\r\n" ) ){
+			break;
+		}
+	}
+
+	sscanf(buf, "%15s %255s %15s\r\n", method, path, version);
+
+	if( strncasecmp( "GET", method, 3 ) != 0 ){
+		return -1;
+	}
+
+	if( strncasecmp( "/backup", path, 7 ) != 0 ){
+		return -1;
+	}
+
+	pbackup_info->nparam = 0;
+	char * p = strchr(path, '?');
+	if( p == NULL ){
+		//没有提供参数
+		return 0;
+	}
+
+	p++;
+	while( pbackup_info->nparam < BACKUP_INFO_MAX_PARAM ){
+
+		char * end = strchr( p, '&' );
+		if( end != NULL ){
+			 *end = 0;
+		}
+
+		char * eq = strchr( p, '=' );
+
+		if( eq == NULL ){
+			strcpy( pbackup_info->param[pbackup_info->nparam].key, p );
+			pbackup_info->param[pbackup_info->nparam].val[0] = 0;
+		}else{
+			*( eq++ ) = 0;
+			strcpy( pbackup_info->param[pbackup_info->nparam].key, p );
+			strcpy( pbackup_info->param[pbackup_info->nparam].val, eq );
+		}
+
+		pbackup_info->nparam++;
+
+		if( end == NULL ){
+			break;
+		}
+
+		p = end + 1;
+	}
+
+	return 0;
+}
+
+
+int main(int argc, char * argv[] )
 {
 	char **client_defaults, **server_defaults;
 	int client_argc, server_argc;
@@ -8970,7 +9089,7 @@ int main(int argc, char **argv)
 
 	xb_regex_init();
 
-	capture_tool_command(argc, argv);
+	// capture_tool_command(argc, argv);
 
 	if (mysql_server_init(-1, NULL, NULL))
 	{
@@ -8984,9 +9103,62 @@ int main(int argc, char **argv)
 		       &server_argc, &server_defaults);
 
     if( xtrabackup_backup && xtrabackup_listen){
-        if( enable_listen_mode() == -1 ){
-		    exit(EXIT_FAILURE);
-        }
+
+		if( xtrabackup_target_socket_fd == -1 ){
+			struct backup_info backup_info;
+
+			if( enable_listen_mode() == -1 ){
+				exit(EXIT_FAILURE);
+			}
+
+			if( recv_http_request( &backup_info ) == -1 ){
+				exit(EXIT_FAILURE);
+			}
+
+			//skip argv[0]
+			argc--;
+			argv++;
+
+			char ** parray = new char* [ backup_info.nparam + argc + 2 ];
+			for( int i=0;i < argc;i++ ){
+				parray[i] =  new char[32];
+				strcpy( parray[i], argv[i] );
+			}
+
+			for( int i=0;i< backup_info.nparam;i++ ){	
+				parray[argc+i] =  new char[32];		
+				strcpy( parray[argc+i], backup_info.param[i].key );
+				if( strlen( backup_info.param[i].val ) > 0  ){
+					strcat( parray[argc+i], "=" );
+					strcat( parray[argc+i], backup_info.param[i].val );
+				}
+			}
+
+			parray[backup_info.nparam + argc] =  new char[32];
+			sprintf( parray[ backup_info.nparam + argc ], "--target-sockfd=%d", xtrabackup_target_socket_fd );
+
+			parray[ backup_info.nparam + argc + 1 ] = NULL;
+
+			for( int i =0; i < backup_info.nparam + argc + 2;i++ ){
+				msg( "%d -> [%s]\n", i, parray[i] );
+			}
+
+			if( send_http_response_header() == -1 ){
+				msg( "send_http_response_header fails" );
+				exit(1);
+			}
+
+			char fpath[128] = {0};
+			if( readlink( "/proc/self/exe", fpath, sizeof(fpath) ) == -1 ){
+				msg( "readlink fails. errno:%d\n", errno );
+				exit(1);
+			}
+
+			if( execvp( fpath, parray ) == -1 ){
+				msg( "execvp fails errno:%d\n", errno );
+				exit(1);
+			}
+		}
     }
 
 	xb_libgcrypt_init();

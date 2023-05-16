@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "datasink.h"
 
 int xtrabackup_target_socket_fd = -1;
+// pthread_mutex_t sockfd_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
 	File fd;
@@ -93,24 +94,99 @@ stdout_open(ds_ctxt_t *ctxt __attribute__((unused)),
 	return file;
 }
 
+int send_all( int fd, const char * buf, size_t len ){
+
+	while( len > 0 ){
+		ssize_t n = send( fd, buf, len, 0 );
+		if( n == -1 ){
+			msg( "send fails errno:%d\n", errno );
+			exit(1);
+			return -1;
+		}
+
+		len -= n;
+		buf += n;
+	}
+
+	return 0;
+}
+
+#if 1
 // success:0 fails: 1
+static
+int
+stdout_write(ds_file_t *file, const void *buf, size_t len)
+{
+	// msg( "stdout_write fd: %d thread:%ld\n", fd, pthread_self() );
+
+	if( xtrabackup_target_socket_fd > 0 ){
+		char chunked_header[32] = {0};
+
+		// pthread_mutex_lock( &sockfd_mutex );
+		// int err_no = pthread_mutex_trylock( &sockfd_mutex );
+		// if( err_no != 0 ){
+		// 	msg( "trylock fails. err:%d\n", err_no );
+		// 	exit(1);
+		// }
+
+		snprintf( chunked_header, sizeof(chunked_header), "%lx\r\n", len );
+		send_all( xtrabackup_target_socket_fd, chunked_header, strlen(chunked_header) );
+		// msg( "header:[%s]\n", chunked_header );
+		send_all( xtrabackup_target_socket_fd, buf, len );
+		send_all( xtrabackup_target_socket_fd, "\r\n", 2 );
+		// pthread_mutex_unlock( &sockfd_mutex );
+
+		return 0;
+	}else{
+		File fd = ((ds_stdout_file_t *) file->ptr)->fd;
+
+		if (!my_write(fd, buf, len, MYF(MY_WME | MY_NABP))) {
+			posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+			return 0;
+		}
+
+		return 1;
+	}
+
+	return 0;
+	// File fd = ((ds_stdout_file_t *) file->ptr)->fd;
+
+	// if( xtrabackup_target_socket_fd > 0 ){
+	// 	char buf[ 16 ];
+	// 	snprintf( buf, sizeof(buf), "%lx\r\n", len );
+	// 	msg( "chunked: len %lx %ld\n", len, len );
+	// 	my_write( xtrabackup_target_socket_fd, (uchar*)buf, strlen(buf), MYF(MY_WME | MY_NABP) );
+	// }
+
+	// //if (!my_write(fd, buf, len, MYF(MY_WME | MY_NABP))) {
+	// if( ! my_write(xtrabackup_target_socket_fd > 0 ? xtrabackup_target_socket_fd: fd , buf, len, MYF(MY_WME | MY_NABP)) ){
+	// 	msg( "chunked send fails\n" );
+    //     return 0; 
+    // }
+
+	// if( ! my_write( xtrabackup_target_socket_fd, (uchar*)"\r\n", 2, MYF(MY_WME | MY_NABP) ) ){
+	// 	msg( "chunked end send fails\n" );
+	// }
+
+    // // close( xtrabackup_target_socket_fd );
+
+	// return 1;
+}
+#else
 static
 int
 stdout_write(ds_file_t *file, const void *buf, size_t len)
 {
 	File fd = ((ds_stdout_file_t *) file->ptr)->fd;
 
-	//if (!my_write(fd, buf, len, MYF(MY_WME | MY_NABP))) {
-	int rst = my_write(xtrabackup_target_socket_fd > 0 ? xtrabackup_target_socket_fd: fd , buf, len, MYF(MY_WME | MY_NABP));
-
-    if( !rst ){
-        return 0; 
-    }
-
-    close( xtrabackup_target_socket_fd );
+	if (!my_write(fd, buf, len, MYF(MY_WME | MY_NABP))) {
+		posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+		return 0;
+	}
 
 	return 1;
 }
+#endif
 
 static
 int
