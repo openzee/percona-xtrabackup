@@ -8920,6 +8920,7 @@ ACCEPT_NEXT:
     socklen_t addrlen = sizeof( struct sockaddr_in);
     memset( &remote_addr, 0, sizeof(remote_addr) );
 
+	msg( "accept wait for new client\n" );
     int connect_sockfd = accept(listen_sockfd, (struct sockaddr*) &remote_addr, &addrlen );
     if( connect_sockfd == -1 ){
         close(listen_sockfd);
@@ -8942,7 +8943,6 @@ ACCEPT_NEXT:
     }
 
     if( pid > 0 ){
-
         close(connect_sockfd);
 
         int wstatus = 0;
@@ -8957,13 +8957,13 @@ ACCEPT_NEXT:
     }
 
     xtrabackup_target_socket_fd = connect_sockfd;
-    
+
     return 0;
 }
 
 struct kv{
 	char key[32];
-	char val[32];
+	char val[128];
 };
 
 #define BACKUP_INFO_MAX_PARAM 10
