@@ -24,4 +24,5 @@ RUN --mount=type=bind,source=./,target=/data,readwrite cmake -DBUILD_CONFIG=xtra
 
 FROM percona/percona-xtrabackup:2.4.26
 COPY --from=builder /usr/local/xtrabackup/bin/xtrabackup /usr/local/bin/my_xtrabackup
+RUN microdnf -y install net-tools procps-ng
 
