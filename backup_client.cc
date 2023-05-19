@@ -16,17 +16,25 @@
 
 #define LSN_PF "%llu"
 #define GROUP_DIRNAME_PERFIX "backup-group-"
+#define BACKUPFILE_SUFFIX ".backup"
 
 typedef uint64_t ib_uint64_t;
 typedef	ib_uint64_t		lsn_t;
+
+int max_group_count = 3;    //备份组最多保留的组数，包括 group-0
+int max_incr_count = 3;     //每组备份中的增量备份的最大数量
+lsn_t g_innodb_to_lsn = 0;
+char xtrabackup_host[64]={0};
+char mysql_host[64];
+char mysql_root_password[64];
+int xtrabackup_compress = 0;
+int compress = 0;
 
 size_t write_file(void* ptr, size_t size, size_t nmemb, void* userdata) {
     FILE* fp = (FILE*)userdata;
     size_t written = fwrite(ptr, size, nmemb, fp);
     return written;
 }
-
-lsn_t g_innodb_to_lsn = 0;
 
 size_t write_header(void *ptr, size_t size, size_t nmemb, void *userdata) {
     printf("%.*s", (int)(size * nmemb), (char*) ptr);
@@ -47,7 +55,13 @@ int download_backup( int fd, lsn_t from_lsn ){
     FILE* fp;
     CURLcode res;
     //char url[128] = "http://bj-cpu065.aibee.cn:9000/backup?--password=root_password&--host=rds-mysql-rep-ms-1";
-    char url[128] = "http://localhost:9000/backup?--password=000000&--host=mysql-node2";
+    char url[256];
+
+    snprintf( url, sizeof(url),  "http://%s:9000/backup?--password=%s&--host=%s", xtrabackup_host, mysql_root_password, mysql_host );
+
+    if( compress ){
+        strcat( url, "&--compress&--compress-threads=8" );
+    }
 
     if( from_lsn ){
         char b[32];
@@ -99,7 +113,8 @@ int download_backup( int fd, lsn_t from_lsn ){
     return 0;
 }
 
-lsn_t find_max_lsn_in_group( const char * workdir, int group_number ){
+lsn_t find_max_lsn_in_group( const char * workdir, int group_number, int *pcount = NULL ){
+    int count = 0;
     DIR *dir;
     struct dirent *entry;
     char path[64];
@@ -130,23 +145,37 @@ lsn_t find_max_lsn_in_group( const char * workdir, int group_number ){
         }
 
         if (endptr == entry->d_name || *endptr != '.' ) {
-            fprintf( stderr, "skip: invalid dirname:[%s] to lsn\n", entry->d_name );
+            fprintf( stderr, "skip: invalid dirname:[%s]\n", entry->d_name );
             continue;
         }
 
+        if( std::string( BACKUPFILE_SUFFIX ) != std::string(endptr)  ){
+            fprintf( stderr, "skip: invalid filetype:[%s]\n", entry->d_name );
+            continue;
+        }
+
+        count++;
         if( val > max_lsn ){
             max_lsn = val;
         }
+    }
+
+    if( pcount != NULL ){
+        *pcount = count;
     }
 
     return max_lsn;
 }
 
 
-int find_oldest_group_dir(char *path) {
+int find_oldest_group_dir( const char *path, int **parray = NULL ) {
     int oldest_index = -1;
     DIR *dir;
     struct dirent *entry;
+    int *plist;
+    int slist = 0;
+
+    plist = (int *)malloc( 100 * sizeof(int));
 
     if ((dir = opendir(path)) == NULL) {
         fprintf( stderr, "opendir:[%s] fails. errno:%d\n", path, errno );
@@ -171,16 +200,38 @@ int find_oldest_group_dir(char *path) {
         char *endptr = NULL;
         const char *nptr = entry->d_name+strlen( GROUP_DIRNAME_PERFIX);
 
-        long int index = strtol( nptr, &endptr, 10 );
+        long int number = strtol( nptr, &endptr, 10 );
         if( endptr == nptr || *endptr != '\0'  ){
             printf( "[%s] invalid name, skip\n", entry->d_name );
             continue;
         }
 
-        if( index > oldest_index ){
-            oldest_index = index;
-        }
+        int i = 0;
+        for( ; i< slist; i++){
+            if( plist[i] >= number )
+                continue;
 
+            for( int j = slist -1; j >= i; j--){
+                plist[j+1] = plist[j];
+            }
+
+            break;
+        }
+        plist[i] = (int)number;
+        slist++;
+
+        if( number > oldest_index ){
+            oldest_index = number ;
+        }
+    }
+
+    plist[slist] = -1; //结尾标志
+
+    if( parray != NULL){
+        *parray = plist;
+    }else{
+        free( plist );
+        plist = NULL;
     }
 
     closedir(dir);
@@ -245,16 +296,40 @@ ERROR:
     return -1;
 }
 
-int run_backup( const std::string workdir ){
+int backup_group_rotate( const std::string & workdir ){
+
+    int *parray = NULL;
+
+    find_oldest_group_dir( workdir.c_str(), &parray );
+
+    for( int i = 0; parray[i] != -1 ;i++  ){
+        char old_name[64];
+        char new_name[64];
+
+        sprintf( old_name, "%s/" GROUP_DIRNAME_PERFIX "%d", workdir.c_str(), parray[i] );
+        sprintf( new_name, "%s/" GROUP_DIRNAME_PERFIX "%d", workdir.c_str(), parray[i] + 1 );
+        rename( old_name, new_name );
+    }
+
+    return 0;
+}
+
+int run_backup( const std::string & workdir ){
     std::string group_name = workdir + "/" + GROUP_DIRNAME_PERFIX "0";
     if( mkdir( group_name.c_str(),  0755 ) == -1 && errno != EEXIST ){
         fprintf( stderr, "mkdir path:[%s] fails. errno:%d\n", GROUP_DIRNAME_PERFIX "0", errno );
         return -1;
     }
 
-    lsn_t fromlsn = find_max_lsn_in_group( workdir.c_str(), 0);
+    int exist_backup_count = 0;
+    lsn_t fromlsn = find_max_lsn_in_group( workdir.c_str(), 0, &exist_backup_count );
 
-#define TMP_BACKUP_NAME GROUP_DIRNAME_PERFIX "0/tmp.backup"
+    if( fromlsn != 0 && exist_backup_count - 1 >= max_incr_count ){
+        backup_group_rotate( workdir );
+        return run_backup( workdir );
+    }
+
+#define TMP_BACKUP_NAME GROUP_DIRNAME_PERFIX "0/tmp" BACKUPFILE_SUFFIX
     std::string tmp_fpath = workdir + "/" + TMP_BACKUP_NAME;
     int fd = open( tmp_fpath.c_str() , O_RDWR|O_CREAT|O_TRUNC,  0644 );
     if ( fd == -1){
@@ -262,12 +337,18 @@ int run_backup( const std::string workdir ){
         return -1;
     }
 
-
     int rst = download_backup(fd, fromlsn );
     close(fd);
 
     if( rst == 0 ){
         char buf[32];
+
+        if( fromlsn >= g_innodb_to_lsn ){
+            fprintf( stderr, "bakcup invalid: fromlsn:[" LSN_PF "] to:[" LSN_PF "]\n", fromlsn, g_innodb_to_lsn);
+            unlink( tmp_fpath.c_str() );
+            return 0;
+        }
+
         snprintf( buf, sizeof(buf), GROUP_DIRNAME_PERFIX "0/" LSN_PF ".backup", g_innodb_to_lsn  );
         rename( tmp_fpath.c_str(), std::string( workdir + "/" + buf ).c_str() );
     }
@@ -283,23 +364,49 @@ int main(int argc, char **argv ) {
     const char *p;
     int fd_log = -1;
     int backup = 0;
-    DIR *pwork_dir = NULL;
+    int clean = 0;
 
     struct option long_options[] = {
-        {"work-dir", required_argument, NULL, 'w'},
-        {"backup", no_argument, NULL, 'b'},
+        {"work-dir", required_argument, NULL, 1},
+        {"xtrabackup-host", required_argument, NULL, 2},
+        {"mysql-host", required_argument, NULL, 3},
+        {"mysql-root-password", required_argument, NULL, 4},
+        {"max-group-count", required_argument, NULL, 5},
+        {"max-incr-count", required_argument, NULL, 6},
+        {"backup", no_argument, NULL, 7},
+        {"clean", no_argument, NULL, 8},
+        {"compress", no_argument, NULL, 9},
         {NULL, 0, NULL, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "w:", long_options, &digit_optind)) != -1) {
+    while ((opt = getopt_long(argc, argv, "", long_options, &digit_optind)) != -1) {
         switch (opt) {
-            case 'w':
-                strncpy( workdir, optarg, 1024 );
+            case 1:
+                strncpy( workdir, optarg, sizeof(workdir ));
                 break;
-            case '?':
+            case 2:
+                strncpy( xtrabackup_host, optarg, sizeof( xtrabackup_host ));
                 break;
-            case 'b':
+            case 3:
+                strncpy( mysql_host, optarg, sizeof( mysql_host ));
+                break;
+            case 4:
+                strncpy( mysql_root_password, optarg, sizeof( mysql_root_password ));
+                break;
+            case 5:
+                max_group_count = atoi( optarg );
+                break;
+            case 6:
+                max_incr_count = atoi( optarg );
+                break;
+            case 7:
                 backup = 1;
+                break;
+            case 8:
+                clean = 1;
+                break;
+            case 9:
+                compress = 1;
                 break;
             default:
                 printf("Unknown option: %c\n", opt);
@@ -307,22 +414,34 @@ int main(int argc, char **argv ) {
         }
     }
 
-    if (( pwork_dir = opendir(workdir)) == NULL) {
-        fprintf( stderr, "opendir:[%s] fails. errno:%d\n", workdir , errno );
-        return -1;
-    }
+    std::cout << "xtrabackup_host:" << xtrabackup_host << std::endl;
+    std::cout << "mysql_host:" << mysql_host << std::endl;
+    std::cout << "mysql_root_password:" << mysql_root_password<< std::endl;
+    std::cout << "workdir:" << workdir << std::endl;
+    std::cout << "max-group-count:" << max_group_count << std::endl;
+    std::cout << "max-incr-count:" << max_incr_count << std::endl;
+    std::cout << "backup:" << backup << std::endl;
 
     if( backup ){
         run_backup( workdir );
-        return 0;
+
+        while( 1){
+            int oldest_index = find_oldest_group_dir( workdir );
+            if( oldest_index >= max_group_count ){
+                delete_backup_group( workdir, oldest_index );
+                continue;
+            }
+
+            break;
+        }
     }
 
-    lsn_t n = find_max_lsn_in_group( workdir, 0);
-    fprintf( stderr, "rst:" LSN_PF "\n", n ); 
-    return 0;
-
-    int oldest_index = find_oldest_group_dir( workdir );
-    delete_backup_group( workdir, oldest_index );
+    if( clean ){
+        int oldest_index = find_oldest_group_dir( workdir );
+        if( oldest_index >= 0 ){
+            delete_backup_group( workdir, oldest_index );
+        }
+    }
 }
 
 
