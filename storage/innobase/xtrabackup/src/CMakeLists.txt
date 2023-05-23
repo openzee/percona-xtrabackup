@@ -119,6 +119,10 @@ TARGET_LINK_LIBRARIES(xtrabackup
   crc
   )
 
+add_executable(backup_client backup_client.cc )
+target_link_libraries(backup_client curl)
+install(TARGETS backup_client DESTINATION bin)
+
 IF(WITH_VERSION_CHECK)
 ADD_CUSTOM_COMMAND(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/version_check_pl.h
                    COMMAND ${XXD_PATH} --include version_check.pl

@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <iostream>
 #include <string>
-
+#include <unistd.h>
 #include <curl/curl.h>
 #include <dirent.h>
 #include <getopt.h>
@@ -12,9 +12,11 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stdint.h>
+#include <inttypes.h>
 
-
-#define LSN_PF "%llu"
+#define UINT64PF	"%" PRIu64
+#define LSN_PF UINT64PF
 #define GROUP_DIRNAME_PERFIX "backup-group-"
 #define BACKUPFILE_SUFFIX ".backup"
 
@@ -155,7 +157,7 @@ lsn_t find_max_lsn_in_group( const char * workdir, int group_number, int *pcount
         }
 
         count++;
-        if( val > max_lsn ){
+        if( (lsn_t)val > max_lsn ){
             max_lsn = val;
         }
     }
@@ -239,7 +241,8 @@ int find_oldest_group_dir( const char *path, int **parray = NULL ) {
 }
 
 struct stack_item{
-    char path[64];
+    char path[128];
+    // std::string path;
     DIR * dir; 
 };
 
@@ -264,7 +267,10 @@ CONTINUE:
             }
 
             if( ( entry->d_type & DT_DIR ) == DT_DIR ){
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
                 snprintf( pstack[top+1].path, sizeof( pstack[top+1].path), "%s/%s", pstack[top].path, entry->d_name );
+#pragma GCC diagnostic pop
                 if( ( pstack[top+1].dir = opendir( pstack[top+1].path ) ) == NULL ){
                     fprintf( stderr, "opendir:[%s] fails. errno:%d\n", pstack[top+1].path, errno );
                     goto ERROR;
@@ -341,7 +347,7 @@ int run_backup( const std::string & workdir ){
     close(fd);
 
     if( rst == 0 ){
-        char buf[32];
+        char buf[128] = {0};
 
         if( fromlsn >= g_innodb_to_lsn ){
             fprintf( stderr, "bakcup invalid: fromlsn:[" LSN_PF "] to:[" LSN_PF "]\n", fromlsn, g_innodb_to_lsn);
@@ -360,9 +366,7 @@ int main(int argc, char **argv ) {
 
     int opt;
     int digit_optind = 0;
-    char workdir[1024];
-    const char *p;
-    int fd_log = -1;
+    char workdir[1024]={0};
     int backup = 0;
     int clean = 0;
 
@@ -440,8 +444,10 @@ int main(int argc, char **argv ) {
         int oldest_index = find_oldest_group_dir( workdir );
         if( oldest_index >= 0 ){
             delete_backup_group( workdir, oldest_index );
+            fprintf( stderr, "del backup group-:%d\n", oldest_index );
+        }else{
+            fprintf( stderr, "can't find backup group\n" );
         }
     }
 }
-
 

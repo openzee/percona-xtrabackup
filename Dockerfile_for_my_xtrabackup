@@ -20,9 +20,9 @@ RUN ./configure && make && make install
 
 ENV WITH_BOOST /root
 WORKDIR /data
-RUN --mount=type=bind,source=./,target=/data,readwrite cmake -DBUILD_CONFIG=xtrabackup_release -DWITH_BOOST=/root /data && make -j8 && make install
+RUN --mount=type=bind,source=./,target=/data,readwrite cmake -DBUILD_CONFIG=xtrabackup_release -DWITH_BOOST=/root /data && make VERBOSE=1 -j8 && make install
 
 FROM percona/percona-xtrabackup:2.4.26
 COPY --from=builder /usr/local/xtrabackup/bin/xtrabackup /usr/local/bin/my_xtrabackup
-RUN microdnf -y install net-tools procps-ng
+COPY --from=builder /usr/local/xtrabackup/bin/backup_client /usr/local/bin/backup_client
 
