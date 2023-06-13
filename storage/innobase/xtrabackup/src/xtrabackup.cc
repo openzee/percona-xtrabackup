@@ -8966,10 +8966,11 @@ struct kv{
 	char val[128];
 };
 
-#define BACKUP_INFO_MAX_PARAM 10
+//xtrabackup_client 传递过来的参数
+#define BACKUP_INFO_MAX_PARAM 30
 struct backup_info{
 	int nparam;
-	struct kv param[BACKUP_INFO_MAX_PARAM];	//最多支持10个参数
+	struct kv param[BACKUP_INFO_MAX_PARAM];
 };
 
 void backup_info_debug( const struct backup_info * p  ){
@@ -8994,7 +8995,7 @@ int send_http_response_header(){
 
 int recv_http_request( struct backup_info * pbackup_info ){
 
-#define GET_REQ_HEADER_MAX_SIZE 1024*16
+#define GET_REQ_HEADER_MAX_SIZE 1024*32
 
 	char method[16]={0}, path[256]={0}, version[16]={0};
 
@@ -9119,23 +9120,29 @@ int main(int argc, char * argv[] )
 			argc--;
 			argv++;
 
+			//重新分配argv参数数组，将xtrabackup的初始化参数和xtrabackup_client传过来的参数进行合并.
+			//新增参数 --target-sockfd=%d
+			//parray 最后一个元素必须是 NULL
+#define ARGV_ITEM_SIZE 64
 			char ** parray = new char* [ backup_info.nparam + argc + 2 ];
+
+			//拷贝xtrbackup原来的参数（不包括argv[0]）
 			for( int i=0;i < argc;i++ ){
-				parray[i] =  new char[32];
-				strcpy( parray[i], argv[i] );
+				parray[i] =  new char[ARGV_ITEM_SIZE];
+				strncpy( parray[i], argv[i], ARGV_ITEM_SIZE );
 			}
 
-			for( int i=0;i< backup_info.nparam;i++ ){	
-				parray[argc+i] =  new char[32];		
-				strcpy( parray[argc+i], backup_info.param[i].key );
+			for( int i=0;i< backup_info.nparam;i++ ){
+				parray[argc+i] =  new char[ARGV_ITEM_SIZE];
+				strncpy( parray[argc+i], backup_info.param[i].key, ARGV_ITEM_SIZE );
 				if( strlen( backup_info.param[i].val ) > 0  ){
 					strcat( parray[argc+i], "=" );
 					strcat( parray[argc+i], backup_info.param[i].val );
 				}
 			}
 
-			parray[backup_info.nparam + argc] =  new char[32];
-			sprintf( parray[ backup_info.nparam + argc ], "--target-sockfd=%d", xtrabackup_target_socket_fd );
+			parray[backup_info.nparam + argc] =  new char[ARGV_ITEM_SIZE];
+			snprintf( parray[ backup_info.nparam + argc ], ARGV_ITEM_SIZE, "--target-sockfd=%d", xtrabackup_target_socket_fd );
 
 			parray[ backup_info.nparam + argc + 1 ] = NULL;
 
