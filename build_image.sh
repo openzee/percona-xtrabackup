@@ -1,12 +1,14 @@
 #########################################################################
 # File Name: build_docker.sh
 # Created Time: 2023-06-14 18:41:12
-# Last modified: 2023-06-15 14:47:41
+# Last modified: 2023-11-19 20:38:31
 #########################################################################
 #!/bin/bash
 
 #---------------------
 #2.4.26-beta.1 | 公测
 #---------------------
-docker build -t platform/xtrabackup:2.4.26-beta.1  -f Dockerfile_for_my_xtrabackup .
+#2.4.26-beta.2 | 禁止密码隐藏功能
+#---------------------
+docker build -t platform/xtrabackup:2.4.26-beta.2  -f Dockerfile_for_my_xtrabackup .
 

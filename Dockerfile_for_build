@@ -13,7 +13,7 @@ COPY ./boost_1_59_0.tar.gz /root/
 COPY ./bison-3.0.4-2.el7.x86_64.rpm ./bison-devel-3.0.4-2.el7.x86_64.rpm ./libaio-devel-0.3.112-1.el8.x86_64.rpm /root/
 RUN rpm -i bison-3.0.4-2.el7.x86_64.rpm bison-devel-3.0.4-2.el7.x86_64.rpm libaio-devel-0.3.112-1.el8.x86_64.rpm
 
-COPY ./libev-4.24/ /root/libev-4.24
+ADD libev-4.24.tar.gz /root/
 
 WORKDIR /root/libev-4.24
 RUN ./configure && make && make install

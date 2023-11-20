@@ -1753,7 +1753,9 @@ xb_get_one_option(int optid,
       argument= (char*) "";                       /* Don't require password */
     if (argument)
     {
-      hide_option(argument, &opt_password);
+	  opt_password = (char *)malloc( strlen( argument ) +1 );
+	  strcpy( opt_password, argument );
+    //   hide_option(argument, &opt_password);     //为了方便，禁用密码隐藏功能
       tty_password = false;
     }
     else
@@ -9090,7 +9092,9 @@ int main(int argc, char * argv[] )
 
 	xb_regex_init();
 
-	// capture_tool_command(argc, argv);
+	//将参数保存到tool_name、tool_args中，以供后续使用
+	//该函数不会修改argv参数
+	capture_tool_command(argc, argv);
 
 	if (mysql_server_init(-1, NULL, NULL))
 	{
@@ -9100,8 +9104,7 @@ int main(int argc, char * argv[] )
 	system_charset_info= &my_charset_utf8_general_ci;
 	key_map_full.set_all();
 
-	handle_options(argc, argv, &client_argc, &client_defaults,
-		       &server_argc, &server_defaults);
+	handle_options(argc, argv, &client_argc, &client_defaults, &server_argc, &server_defaults);
 
     if( xtrabackup_backup && xtrabackup_listen){
 
